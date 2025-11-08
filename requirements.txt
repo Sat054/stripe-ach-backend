@@ -1,3 +1,4 @@
 fastapi
 uvicorn
 stripe
+requests  # <--- Make sure this line is added
