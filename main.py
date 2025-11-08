@@ -4,7 +4,7 @@ import stripe
 import os
 import requests
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 # --- 1. CORE APPLICATION INITIALIZATION ---
 app = FastAPI()
@@ -200,12 +200,16 @@ async def shopify_webhook(
         print(f"\n--- INCOMING WEBHOOK DIAGNOSTIC START ---")
         print(f"TOPIC HEADER: {x_shopify_topic}")
         # Print the entire payload for inspection
-        print(f"PAYLOAD DATA: {json.dumps(data, indent=2)}")
+        # NOTE: This line is removed in V8 since the diagnostic is complete.
+        # However, keeping it for troubleshooting: print(f"PAYLOAD DATA: {json.dumps(data, indent=2)}")
         print(f"--- INCOMING WEBHOOK DIAGNOSTIC END ---\n")
         # --- END NEW DIAGNOSTIC LOGGING ---
         
         order_id = data.get("id")
-        gateway = data.get("gateway")
+        gateway_names: List[str] = data.get("payment_gateway_names") # Use the correct field name
+        
+        # Use the first gateway name as the one selected for payment processing logic
+        gateway = gateway_names[0] if gateway_names and isinstance(gateway_names, list) and len(gateway_names) > 0 else None
         
     except json.JSONDecodeError as e:
         print(f"FAILURE: Error processing webhook JSON: {e}")
@@ -218,12 +222,11 @@ async def shopify_webhook(
     # 4. TOPIC AND FIELD VALIDATION
     if x_shopify_topic != 'orders/create':
         print(f"FAILURE: Topic is '{x_shopify_topic}'. Expected 'orders/create'.")
-        # We return 200 here if the topic is wrong, as we ignore it.
-        # This prevents Shopify from retrying if we didn't ask for this topic.
         return PlainTextResponse(f"Wrong topic received: {x_shopify_topic}", status_code=200) 
 
+    # Check for the order ID and the new gateway variable
     if not order_id or not gateway:
-        print("FAILURE: Payload missing 'id' or 'gateway' fields.")
+        print(f"FAILURE: Payload missing 'id' ({order_id}) or a valid payment gateway name in 'payment_gateway_names' ({gateway}).")
         return PlainTextResponse("Missing order ID or gateway in payload.", status_code=400)
             
     print(f"SUCCESS: Received webhook for Order ID: {order_id}, Gateway: {gateway}")
@@ -232,7 +235,7 @@ async def shopify_webhook(
     if gateway != MANUAL_PAYMENT_GATEWAY_NAME:
         # If it's another method, we exit gracefully.
         print(f"Gateway '{gateway}' does not match required '{MANUAL_PAYMENT_GATEWAY_NAME}'. Ignored.")
-        return PlainTextResponse(f"Processing ignored.", status_code=200) # FIXED CLOSING PARENTHESIS HERE
+        return PlainTextResponse(f"Processing ignored.", status_code=200)
 
     # 6. Generate Link
     try:
