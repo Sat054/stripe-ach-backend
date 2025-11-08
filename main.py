@@ -1,22 +1,8 @@
-I completely understand the need to bypass that security check to confirm the rest of your automation works. Since you are certain the **Secret** field is missing on Shopify's side, this is the correct diagnostic step.
-
-Here is the complete `main.py` code (Diagnostic V6) with the security signature check permanently bypassed.
-
------
-
-## ✅ Final Diagnostic Backend (V6) - Security Check Bypassed
-
-This file has the `verify_webhook_signature` function set to always return `True`, allowing the webhook to proceed to the main logic.
-
-````python:final Diagnostic Backend (Security Bypass):main.py
 from fastapi import FastAPI, Request, Header
 from fastapi.responses import RedirectResponse, PlainTextResponse
 import stripe
 import os
 import requests
-import hmac
-import hashlib
-import base64
 import json
 from typing import Dict, Any, Optional
 
@@ -61,6 +47,7 @@ def get_order_amount(order_id: int) -> Optional[int]:
         print("Shopify configuration missing. Cannot fetch order amount.")
         return None
 
+    # We are using the stable 2024-07 version of the Shopify Admin API
     url = f"https://{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
     
     try:
@@ -71,9 +58,10 @@ def get_order_amount(order_id: int) -> Optional[int]:
         # Robustly extract the total price
         order_info = order_data.get("order")
         if not order_info:
-            print(f"ERROR: Shopify response is missing 'order' key for ID {order_id}.")
+            print(f"ERROR: Shopify response is missing 'order' key for ID {order_id}. Response: {response.text}")
             return None
         
+        # Prefer total_price_set for robustness, fall back to total_price
         total_price_usd = (
             order_info.get("total_price_set", {})
             .get("shop_money", {})
@@ -94,8 +82,12 @@ def get_order_amount(order_id: int) -> Optional[int]:
 
         return amount_cents
         
+    except requests.exceptions.HTTPError as e:
+        # Catch specific API errors like 404 (order not found) or 401 (bad token)
+        print(f"Error fetching order {order_id} (HTTP status: {e.response.status_code}, detail: {e.response.text})")
+        return None
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching order {order_id} (API failure): {e}")
+        print(f"Error fetching order {order_id} (Network/Request failure): {e}")
         return None
     except Exception as e:
         print(f"CRITICAL PARSING ERROR for order {order_id}: {e}")
@@ -128,7 +120,7 @@ def update_shopify_order_note(order_id: int, note: str) -> bool:
 # NOTE: THIS FUNCTION IS MODIFIED TO ALWAYS RETURN TRUE FOR DIAGNOSTICS
 def verify_webhook_signature(data: bytes, hmac_header: str) -> bool:
     """TEMPORARILY BYPASSING VALIDATION due to missing Shopify secret field."""
-    print("⚠️ WARNING: Webhook security check skipped. Verify keys if enabling security later.")
+    print("⚠️ WARNING: Webhook security check skipped for diagnostic purposes.")
     return True 
 
 
@@ -198,8 +190,7 @@ async def shopify_webhook(
     
     # 2. SECURITY: Bypass the webhook signature check (verify_webhook_signature always returns True)
     if not verify_webhook_signature(body_bytes, x_shopify_hmac_sha256):
-        # This block is now unreachable due to the bypass in verify_webhook_signature
-        print("ERROR: Should not be here if security is bypassed.")
+        # This block is unreachable due to the bypass above
         return PlainTextResponse("Unauthorized", status_code=401)
         
     # 3. EXTRACT DATA: Safely parse the bytes into JSON
@@ -273,7 +264,3 @@ async def shopify_webhook(
     except Exception as e:
         print(f"Unhandled error in webhook: {e}")
         return PlainTextResponse("Unhandled server error.", status_code=200)
-```eof
-
-Please deploy this code, place a new test order, and share the logs. This will either give us a clean **`SUCCESS`** or confirm that your **`SHOPIFY_API_TOKEN`** is the final issue.
-````
