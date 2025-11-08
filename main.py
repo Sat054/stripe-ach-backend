@@ -83,7 +83,6 @@ def get_order_amount(order_id: int) -> Optional[int]:
         return amount_cents
         
     except requests.exceptions.HTTPError as e:
-        # Catch specific API errors like 404 (order not found) or 401 (bad token)
         print(f"Error fetching order {order_id} (HTTP status: {e.response.status_code}, detail: {e.response.text})")
         return None
     except requests.exceptions.RequestException as e:
@@ -188,28 +187,26 @@ async def shopify_webhook(
     # 1. READ BODY ONCE: Read the body as bytes for HMAC validation
     body_bytes = await request.body()
     
-    # 2. SECURITY: Bypass the webhook signature check (verify_webhook_signature always returns True)
+    # 2. SECURITY: Bypass the webhook signature check 
     if not verify_webhook_signature(body_bytes, x_shopify_hmac_sha256):
         # This block is unreachable due to the bypass above
         return PlainTextResponse("Unauthorized", status_code=401)
         
-    # 3. EXTRACT DATA: Safely parse the bytes into JSON
+    # 3. EXTRACT DATA: Safely parse the bytes into JSON and log everything
     try:
         data = json.loads(body_bytes.decode('utf-8'))
+        
+        # --- NEW DIAGNOSTIC LOGGING ---
+        print(f"\n--- INCOMING WEBHOOK DIAGNOSTIC START ---")
+        print(f"TOPIC HEADER: {x_shopify_topic}")
+        # Print the entire payload for inspection
+        print(f"PAYLOAD DATA: {json.dumps(data, indent=2)}")
+        print(f"--- INCOMING WEBHOOK DIAGNOSTIC END ---\n")
+        # --- END NEW DIAGNOSTIC LOGGING ---
+        
         order_id = data.get("id")
         gateway = data.get("gateway")
         
-        # Shopify sends a 'ping' webhook for initial setup. We ignore it unless it's the correct topic.
-        if x_shopify_topic != 'orders/create':
-            print(f"Ignored webhook topic: {x_shopify_topic}")
-            return PlainTextResponse(f"Ignored topic: {x_shopify_topic}", status_code=200)
-
-        if not order_id or not gateway:
-            print("FAILURE: Payload missing order ID or gateway.")
-            return PlainTextResponse("Missing order ID or gateway in payload.", status_code=400)
-            
-        print(f"SUCCESS: Received webhook for Order ID: {order_id}, Gateway: {gateway}")
-
     except json.JSONDecodeError as e:
         print(f"FAILURE: Error processing webhook JSON: {e}")
         return PlainTextResponse("Invalid JSON payload.", status_code=400)
@@ -217,50 +214,22 @@ async def shopify_webhook(
         print(f"FAILURE: Error during data extraction: {e}")
         return PlainTextResponse("Data extraction failed.", status_code=400)
 
-    # 4. BUSINESS LOGIC: Check if it's the target payment method
+
+    # 4. TOPIC AND FIELD VALIDATION
+    if x_shopify_topic != 'orders/create':
+        print(f"FAILURE: Topic is '{x_shopify_topic}'. Expected 'orders/create'.")
+        # We return 200 here if the topic is wrong, as we ignore it.
+        # This prevents Shopify from retrying if we didn't ask for this topic.
+        return PlainTextResponse(f"Wrong topic received: {x_shopify_topic}", status_code=200) 
+
+    if not order_id or not gateway:
+        print("FAILURE: Payload missing 'id' or 'gateway' fields.")
+        return PlainTextResponse("Missing order ID or gateway in payload.", status_code=400)
+            
+    print(f"SUCCESS: Received webhook for Order ID: {order_id}, Gateway: {gateway}")
+
+    # 5. BUSINESS LOGIC: Check if it's the target payment method
     if gateway != MANUAL_PAYMENT_GATEWAY_NAME:
         # If it's another method, we exit gracefully.
         print(f"Gateway '{gateway}' does not match required '{MANUAL_PAYMENT_GATEWAY_NAME}'. Ignored.")
-        return PlainTextResponse(f"Processing ignored.", status_code=200)
-
-    # 5. Generate Link
-    try:
-        amount = get_order_amount(order_id)
-        
-        # If the SHOPIFY_API_TOKEN is bad, this will be None, and we will get a failure message
-        if amount is None or amount <= 0:
-            print(f"FAILURE: Could not retrieve valid amount for order {order_id}. (Check SHOPIFY_API_TOKEN/URL).")
-            return PlainTextResponse(f"Could not retrieve valid amount for order {order_id}.", status_code=200)
-
-        # Check for existing link 
-        if order_id in order_links:
-            payment_link_url = order_links[order_id]
-        else:
-            payment_link = stripe.PaymentLink.create(
-                line_items=[{
-                    "price_data": {
-                        "currency": "usd", "unit_amount": amount, 
-                        "product_data": {"name": f"Shopify Order #{order_id}", "description": "ACH Payment Link."}
-                    },
-                    "quantity": 1,
-                }],
-                payment_method_types=["us_bank_account"],
-                metadata={"shopify_order_id": str(order_id)},
-            )
-            payment_link_url = payment_link.url
-            order_links[order_id] = payment_link_url
-
-        # 6. Update Shopify Order
-        note_text = f"Thank you for choosing Manual ACH. Please complete your payment here:\n{payment_link_url}"
-        
-        if update_shopify_order_note(order_id, note_text):
-            return PlainTextResponse("Payment link generated and order updated.", status_code=200)
-        else:
-            return PlainTextResponse("Link generated, but failed to update order.", status_code=200)
-
-    except stripe.error.StripeError as e:
-        print(f"Stripe API Error during webhook processing: {e}")
-        return PlainTextResponse(f"Stripe error: {e.user_message}", status_code=200)
-    except Exception as e:
-        print(f"Unhandled error in webhook: {e}")
-        return PlainTextResponse("Unhandled server error.", status_code=200)
+        return PlainTextResponse(f"Processing ignored.", status_code=20
