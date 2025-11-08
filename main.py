@@ -30,7 +30,7 @@ headers = {
 # Temporary storage for payment links (resets on server restart/deploy)
 order_links: Dict[int, str] = {}
 
-# --- 3. HELPER FUNCTION (UPDATED FOR ROBUSTNESS) ---
+# --- 3. HELPER FUNCTION (ROBUST) ---
 
 def get_order_amount(order_id: int) -> int | None:
     """
@@ -43,7 +43,7 @@ def get_order_amount(order_id: int) -> int | None:
 
     # Using the Admin API to get order details
     url = f"https://{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
-    order_data: Dict[str, Any] = {} # Initialize outside of try block for debugging access
+    order_data: Dict[str, Any] = {}
     
     try:
         response = requests.get(url, headers=headers)
@@ -54,10 +54,10 @@ def get_order_amount(order_id: int) -> int | None:
         # --- ROBUST PARSING LOGIC ---
         order_info = order_data.get("order")
         if not order_info:
-            print(f"ERROR: Shopify response is missing 'order' key for ID {order_id}. Response Keys: {list(order_data.keys()) if order_data else 'None'}")
+            print(f"ERROR: Shopify response is missing 'order' key for ID {order_id}.")
             return None
         
-        # Use .get() chains to safely access deeply nested dictionary values
+        # Safely access the price data using .get() chains
         total_price_usd = (
             order_info.get("total_price_set", {})
             .get("shop_money", {})
@@ -84,9 +84,8 @@ def get_order_amount(order_id: int) -> int | None:
         print(f"Error fetching order {order_id} (API failure): {e}")
         return None
     except Exception as e:
-        # Catch any final parsing errors (e.g., trying to float() a non-numeric string)
+        # Critical catch-all for any data parsing issues
         print(f"CRITICAL PARSING ERROR for order {order_id}: {e}")
-        # Log the keys to help debug the actual structure
         print(f"Response Keys: {list(order_data.keys()) if order_data else 'No response data.'}")
         return None
 
@@ -108,21 +107,18 @@ async def pay(order_id: int):
     # 1. Fetch the order amount
     amount = get_order_amount(order_id)
     
-    # If amount is None due to an error, we return 404/400 to the user
     if amount is None or amount <= 0:
-        # User sees this message; the detailed error is in the Render logs.
         return PlainTextResponse(
-            f"Order {order_id} not found or could not retrieve a valid amount. Check backend logs for CRITICAL PARSING ERROR details.", 
+            f"Order {order_id} not found or could not retrieve a valid amount. Check backend logs for details.", 
             status_code=404
         )
     
     # Check if a link already exists
     if order_id in order_links:
-        print(f"Redirecting to existing link for Order {order_id}")
         return RedirectResponse(order_links[order_id], status_code=303)
 
     try:
-        # 2. Create the Stripe Payment Link
+        # 2. Create the Stripe Payment Link (FIXED: Removed invalid success_url/cancel_url)
         payment_link = stripe.PaymentLink.create(
             line_items=[{
                 "price_data": {
@@ -138,9 +134,8 @@ async def pay(order_id: int):
             payment_method_types=["us_bank_account"],
             metadata={"shopify_order_id": str(order_id)},
             
-            # --- !!! IMPORTANT: REPLACE THESE WITH YOUR STORE'S ACTUAL URLs !!! ---
-            success_url="https://YOUR_STORE_URL/checkout/thank_you?session_id={CHECKOUT_SESSION_ID}", 
-            cancel_url="https://YOUR_STORE_URL/cart"
+            # NOTE: success_url and cancel_url are invalid parameters for PaymentLink.
+            # Post-payment behavior is configured in the Stripe dashboard or via 'after_completion'.
         )
         
         # 3. Store and Redirect
@@ -149,6 +144,7 @@ async def pay(order_id: int):
         
     except stripe.error.StripeError as e:
         print(f"Stripe API Error: {e}")
+        # Return a clean error message to the user
         return PlainTextResponse(f"Payment processing failed: {e.user_message}", status_code=500)
     except Exception as e:
         print(f"An unexpected server error occurred: {e}")
