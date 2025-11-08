@@ -3,6 +3,10 @@ from fastapi.responses import RedirectResponse, PlainTextResponse
 import stripe
 import os
 
+SHOPIFY_API_TOKEN = os.getenv("SHOPIFY_API_TOKEN")
+
+headers = { "X-Shopify-Access-Token": SHOPIFY_API_TOKEN }
+
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 app = FastAPI()
 
