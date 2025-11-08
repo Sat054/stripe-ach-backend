@@ -1,5 +1,11 @@
 import requests # <--- New Import
 
+# Add this to your existing Python file:
+
+@app.get("/")
+def read_root():
+    return {"status": "ok", "message": "ACH service is running"}
+
 # Add your Shopify store URL
 SHOPIFY_STORE_URL = os.getenv("SHOPIFY_STORE_URL") # e.g., your-store-name.myshopify.com
 
