@@ -1,3 +1,14 @@
+I completely understand the need to bypass that security check to confirm the rest of your automation works. Since you are certain the **Secret** field is missing on Shopify's side, this is the correct diagnostic step.
+
+Here is the complete `main.py` code (Diagnostic V6) with the security signature check permanently bypassed.
+
+-----
+
+## ✅ Final Diagnostic Backend (V6) - Security Check Bypassed
+
+This file has the `verify_webhook_signature` function set to always return `True`, allowing the webhook to proceed to the main logic.
+
+````python:final Diagnostic Backend (Security Bypass):main.py
 from fastapi import FastAPI, Request, Header
 from fastapi.responses import RedirectResponse, PlainTextResponse
 import stripe
@@ -114,21 +125,11 @@ def update_shopify_order_note(order_id: int, note: str) -> bool:
         print(f"Error updating Shopify order {order_id}: {e}")
         return False
 
+# NOTE: THIS FUNCTION IS MODIFIED TO ALWAYS RETURN TRUE FOR DIAGNOSTICS
 def verify_webhook_signature(data: bytes, hmac_header: str) -> bool:
-    """Validates the request signature to ensure it came from Shopify."""
-    if not SHOPIFY_WEBHOOK_SECRET:
-        print("WARNING: SHOPIFY_WEBHOOK_SECRET is not set. Skipping validation. DANGEROUS IN PRODUCTION!")
-        return True 
-        
-    digest = hmac.new(
-        SHOPIFY_WEBHOOK_SECRET.encode('utf-8'),
-        data,
-        hashlib.sha256
-    ).digest()
-    
-    calculated_hmac = base64.b64encode(digest).decode()
-    
-    return hmac.compare_digest(hmac_header, calculated_hmac)
+    """TEMPORARILY BYPASSING VALIDATION due to missing Shopify secret field."""
+    print("⚠️ WARNING: Webhook security check skipped. Verify keys if enabling security later.")
+    return True 
 
 
 # --- 4. ENDPOINTS ---
@@ -195,9 +196,10 @@ async def shopify_webhook(
     # 1. READ BODY ONCE: Read the body as bytes for HMAC validation
     body_bytes = await request.body()
     
-    # 2. SECURITY: Verify the webhook signature
+    # 2. SECURITY: Bypass the webhook signature check (verify_webhook_signature always returns True)
     if not verify_webhook_signature(body_bytes, x_shopify_hmac_sha256):
-        print("Webhook signature failed verification.")
+        # This block is now unreachable due to the bypass in verify_webhook_signature
+        print("ERROR: Should not be here if security is bypassed.")
         return PlainTextResponse("Unauthorized", status_code=401)
         
     # 3. EXTRACT DATA: Safely parse the bytes into JSON
@@ -212,15 +214,16 @@ async def shopify_webhook(
             return PlainTextResponse(f"Ignored topic: {x_shopify_topic}", status_code=200)
 
         if not order_id or not gateway:
+            print("FAILURE: Payload missing order ID or gateway.")
             return PlainTextResponse("Missing order ID or gateway in payload.", status_code=400)
             
-        print(f"Received webhook for Order ID: {order_id}, Gateway: {gateway}")
+        print(f"SUCCESS: Received webhook for Order ID: {order_id}, Gateway: {gateway}")
 
     except json.JSONDecodeError as e:
-        print(f"Error processing webhook JSON: {e}")
+        print(f"FAILURE: Error processing webhook JSON: {e}")
         return PlainTextResponse("Invalid JSON payload.", status_code=400)
     except Exception as e:
-        print(f"Error during data extraction: {e}")
+        print(f"FAILURE: Error during data extraction: {e}")
         return PlainTextResponse("Data extraction failed.", status_code=400)
 
     # 4. BUSINESS LOGIC: Check if it's the target payment method
@@ -232,8 +235,10 @@ async def shopify_webhook(
     # 5. Generate Link
     try:
         amount = get_order_amount(order_id)
+        
+        # If the SHOPIFY_API_TOKEN is bad, this will be None, and we will get a failure message
         if amount is None or amount <= 0:
-            print(f"Could not retrieve valid amount for order {order_id}. Aborting link generation.")
+            print(f"FAILURE: Could not retrieve valid amount for order {order_id}. (Check SHOPIFY_API_TOKEN/URL).")
             return PlainTextResponse(f"Could not retrieve valid amount for order {order_id}.", status_code=200)
 
         # Check for existing link 
@@ -268,3 +273,7 @@ async def shopify_webhook(
     except Exception as e:
         print(f"Unhandled error in webhook: {e}")
         return PlainTextResponse("Unhandled server error.", status_code=200)
+```eof
+
+Please deploy this code, place a new test order, and share the logs. This will either give us a clean **`SUCCESS`** or confirm that your **`SHOPIFY_API_TOKEN`** is the final issue.
+````
