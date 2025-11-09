@@ -5,6 +5,9 @@ import os
 import requests
 import json
 from typing import List, Dict, Any
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # --- 1. CORE APPLICATION INITIALIZATION ---
 app = FastAPI()
@@ -19,7 +22,14 @@ SHOPIFY_WEBHOOK_SECRET = os.getenv("SHOPIFY_WEBHOOK_SECRET")
 
 # CUSTOM ENV VAR (Must match the exact name of your manual payment method in Shopify)
 # The log confirmed this is "Pay via ACH" for your setup.
-MANUAL_PAYMENT_GATEWAY_NAME = os.getenv("MANUAL_PAYMENT_GATEWAY_NAME", "Pay via ACH") 
+MANUAL_PAYMENT_GATEWAY_NAME = os.getenv("MANUAL_PAYMENT_GATEWAY_NAME", "Pay via ACH")
+
+# EMAIL CONFIGURATION (Optional - for sending payment instructions via email)
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")  # Default to Gmail
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))  # TLS port
+SMTP_USER = os.getenv("SMTP_USER")  # Your email address
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")  # App password
+FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USER)  # Sender email
 
 # Stripe Initialization
 if STRIPE_SECRET_KEY:
@@ -81,6 +91,53 @@ def get_order_amount(order_id: int) -> float | None:
     except Exception as e:
         print(f"CRITICAL PARSING ERROR for order {order_id}: {e}")
         return None
+def send_payment_email(customer_email: str, order_id: int, payment_link_url: str, customer_name: str = None) -> bool:
+        """Sends an email to the customer with ACH payment instructions and link."""
+        if not SMTP_USER or not SMTP_PASSWORD:
+                    print("Email configuration missing. Skipping email notification.")
+                    return False
+
+    try:
+                # Create email
+                msg = MIMEMultipart('alternative')
+                msg['Subject'] = f"Complete Your ACH Payment - Order #{order_id}"
+                msg['From'] = FROM_EMAIL
+                msg['To'] = customer_email
+
+        # Create HTML email body
+        greeting = f"Hi {customer_name}," if customer_name else "Hello,"
+        html_body = f"""
+                <html>
+                          <body style='font-family: Arial, sans-serif; color: #333;'>
+                                      <h2 style='color: #2563eb;'>Complete Your ACH Payment</h2>
+                                                  <p>{greeting}</p>
+                                                              <p>Thank you for your order <strong>#{order_id}</strong>!</p>
+                                                                          <p>To complete your purchase, please click the secure payment link below:</p>
+                                                                                      <p style='margin: 30px 0;'>
+                                                                                                    <a href='{payment_link_url}' style='background-color: #2563eb; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; display: inline-block;'>Pay with Bank Account</a>
+                                                                                                                </p>
+                                                                                                                            <p>You will be redirected to Stripe to securely enter your bank account details.</p>
+                                                                                                                                        <p style='margin-top: 30px; font-size: 12px; color: #666;'>If you have any questions, please contact our support team.</p>
+                                                                                                                                                  </body>
+                                                                                                                                                          </html>
+                                                                                                                                                                  """
+
+        # Attach HTML part
+        html_part = MIMEText(html_body, 'html')
+        msg.attach(html_part)
+
+        # Send email
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                        server.starttls()
+                        server.login(SMTP_USER, SMTP_PASSWORD)
+                        server.sendmail(FROM_EMAIL, customer_email, msg.as_string())
+
+        print(f"Payment email sent successfully to {customer_email} for Order #{order_id}")
+        return True
+
+    except Exception as e:
+        print(f"Error sending payment email: {e}")
+        return False
 
 def update_shopify_order_note(order_id: int, note: str) -> bool:
     """Updates the customer-facing note on the Shopify order."""
@@ -208,6 +265,12 @@ async def shopify_webhook(
         )
         
         if update_shopify_order_note(order_id, note_text):
+                    # Send payment email to customer
+                    customer_email = data.get("customer", {}).get("email")
+                    customer_name = data.get("customer", {}).get("first_name")
+                    if customer_email:
+                                    send_payment_email(customer_email, order_id, payment_link_url, customer_name)
+                        
             return PlainTextResponse("Payment link generated and order updated.", status_code=200)
         else:
             return PlainTextResponse("Link generated, but failed to update order.", status_code=200)
