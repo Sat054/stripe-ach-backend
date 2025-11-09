@@ -5,10 +5,6 @@ import os
 import requests
 import json
 from typing import List, Dict, Any, Optional
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-import email.utils 
 
 # --- 1. CORE APPLICATION INITIALIZATION ---
 app = FastAPI(title="Shopify ACH Stripe Link Generator")
@@ -19,16 +15,11 @@ app = FastAPI(title="Shopify ACH Stripe Link Generator")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 SHOPIFY_API_TOKEN = os.getenv("SHOPIFY_API_TOKEN")
 SHOPIFY_STORE_URL = os.getenv("SHOPIFY_STORE_URL")
-# SHOPIFY_WEBHOOK_SECRET is no longer used in this version.
+SHOPIFY_WEBHOOK_SECRET = os.getenv("SHOPIFY_WEBHOOK_SECRET") 
+STRIPE_WEBHOOK_SECRET_PAYMENT = os.getenv("STRIPE_WEBHOOK_SECRET_PAYMENT") # New secret for Stripe webhooks
 
-# --- CUSTOM PAYMENT & EMAIL CONFIGURATION (MUST BE SET FOR EMAIL) ---
+# --- CUSTOM PAYMENT CONFIGURATION (MUST BE SET) ---
 MANUAL_PAYMENT_GATEWAY_NAME = os.getenv("MANUAL_PAYMENT_GATEWAY_NAME", "Pay via ACH")
-FROM_NAME = os.getenv("FROM_NAME", "Your Store Name")
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USER)
 
 # Stripe Initialization
 if STRIPE_SECRET_KEY:
@@ -50,6 +41,7 @@ def get_order_amount(order_id: int) -> Optional[float]:
         print("Shopify configuration missing. Cannot fetch order amount.")
         return None
 
+    # Simplified API version for stability
     url = f"https{"://"}{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
 
     try:
@@ -76,49 +68,6 @@ def get_order_amount(order_id: int) -> Optional[float]:
         print(f"Error fetching order {order_id}: {e}")
         return None
 
-def send_payment_email(customer_email: str, order_id: int, payment_link_url: str, customer_name: Optional[str] = None) -> bool:
-    """Sends an email to the customer with ACH payment instructions and link."""
-    if not SMTP_USER or not SMTP_PASSWORD:
-        return False
-
-    try:
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = f"Complete Your ACH Payment - Order #{order_id}"
-        msg['From'] = email.utils.formataddr((FROM_NAME, FROM_EMAIL))
-        msg['To'] = customer_email
-
-        greeting = f"Hi {customer_name}," if customer_name else "Hello,"
-        html_body = f"""
-        <html>
-            <body style='font-family: Arial, sans-serif; color: #333;'>
-                <h2 style='color: #2563eb;'>Complete Your ACH Payment</h2>
-                <p>{greeting}</p>
-                <p>Thank you for your order <strong>#{order_id}</strong> from {FROM_NAME}!</p>
-                <p>To complete your purchase, please click the secure payment link below:</p>
-                <p style='margin: 30px 0;'>
-                    <a href='{payment_link_url}' style='background-color: #2563eb; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; display: inline-block;'>Pay with Bank Account</a>
-                </p>
-                <p>You will be redirected to Stripe to securely enter your bank account details.</p>
-                <p style='margin-top: 30px; font-size: 12px; color: #666;'>If you have any questions, please contact our support team at {FROM_EMAIL}.</p>
-            </body>
-        </html>
-        """
-
-        html_part = MIMEText(html_body, 'html')
-        msg.attach(html_part)
-
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(FROM_EMAIL, customer_email, msg.as_string())
-
-        print(f"Payment email sent successfully to {customer_email} for Order #{order_id}")
-        return True
-
-    except Exception as e:
-        print(f"Error sending payment email: {e}")
-        return False
-
 def update_shopify_order_note(order_id: int, note: str) -> bool:
     """Updates the customer-facing note on the Shopify order."""
     if not SHOPIFY_STORE_URL or not SHOPIFY_API_TOKEN:
@@ -141,12 +90,45 @@ def update_shopify_order_note(order_id: int, note: str) -> bool:
         print(f"Error updating Shopify order {order_id}: {e}")
         return False
 
-def verify_webhook_signature(data: bytes, hmac_header: Optional[str]) -> bool:
+def verify_shopify_webhook_signature(data: bytes, hmac_header: Optional[str]) -> bool:
     """
-    Bypassing webhook security check as requested.
+    *** WARNING: THIS IS THE INSECURE BYPASSED VERSION ***
+    For testing, this function returns True. You should secure this in production.
     """
-    print("⚠️ WARNING: Webhook security check is disabled.")
+    print("⚠️ WARNING: Shopify Webhook security check is disabled.")
     return True
+
+def mark_shopify_order_paid(order_id: int, amount: str) -> bool:
+    """Marks a Shopify order as paid by creating a transaction."""
+    if not SHOPIFY_STORE_URL or not SHOPIFY_API_TOKEN:
+        print("Shopify configuration missing. Cannot mark order paid.")
+        return False
+
+    url = f"https{"://"}{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}/transactions.json"
+
+    # The payload for marking an order paid (creating a transaction)
+    payload: Dict[str, Any] = {
+        "transaction": {
+            "kind": "capture",          # 'capture' means finalizing the payment
+            "status": "success",        # The payment was successful on Stripe
+            "amount": amount,           # The total amount paid (e.g., "100.00")
+            "gateway": "Stripe ACH",    # The name that will appear on the Shopify order
+            "currency": "USD"           # Ensure this matches your store currency
+        }
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        print(f"Transaction created successfully for Order {order_id}. Order is now marked Paid.")
+        return True
+    except requests.exceptions.RequestException as e:
+        print(f"Error marking Shopify order {order_id} paid: {e}")
+        try:
+            print(f"Shopify API Error details: {response.json()}")
+        except:
+            pass
+        return False
 
 
 # --- 4. ENDPOINTS ---
@@ -164,47 +146,33 @@ async def shopify_webhook(
     x_shopify_topic: Optional[str] = Header(None)
 ):
     """
-    Handles the 'orders/create' webhook from Shopify.
+    Handles the 'orders/create' webhook from Shopify: Generates Stripe Link.
     """
-    # 1. READ BODY ONCE: Read the body as bytes for HMAC validation
     body_bytes = await request.body()
 
-    # 2. SECURITY: Perform the (bypassed) validation
-    if not verify_webhook_signature(body_bytes, x_shopify_hmac_sha256):
-        # This code block will not be reached as the function above always returns True
+    if not verify_shopify_webhook_signature(body_bytes, x_shopify_hmac_sha256):
         return PlainTextResponse("Unauthorized", status_code=401)
 
-    # 3. EXTRACT DATA
     try:
         data: Dict[str, Any] = json.loads(body_bytes.decode('utf-8'))
         order_id: int = data.get("id", 0)
         gateway_names: List[str] = data.get("payment_gateway_names", [])
         gateway: Optional[str] = gateway_names[0] if gateway_names and len(gateway_names) > 0 else None
-
-    except json.JSONDecodeError:
-        return PlainTextResponse("Invalid JSON payload.", status_code=400)
-    except Exception:
+    except:
         return PlainTextResponse("Data extraction failed.", status_code=400)
 
-
-    # 4. TOPIC AND FIELD VALIDATION
     if x_shopify_topic != 'orders/create':
         return PlainTextResponse(f"Wrong topic received: {x_shopify_topic}", status_code=200)
 
-    if not order_id or not gateway:
-        return PlainTextResponse("Missing order ID or gateway in payload.", status_code=400)
-
-    print(f"SUCCESS: Received webhook for Order ID: {order_id}, Gateway: {gateway}")
-
-    # 5. BUSINESS LOGIC: Check if it's the target payment method
-    if gateway != MANUAL_PAYMENT_GATEWAY_NAME:
+    if not order_id or gateway != MANUAL_PAYMENT_GATEWAY_NAME:
         print(f"Gateway '{gateway}' does not match required '{MANUAL_PAYMENT_GATEWAY_NAME}'. Ignored.")
         return PlainTextResponse(f"Processing ignored.", status_code=200)
 
-    # 6. Generate Link
+    print(f"SUCCESS: Received webhook for Order ID: {order_id}, Gateway: {gateway}. Generating link...")
+
+    # Generate Link
     try:
         amount_float: Optional[float] = get_order_amount(order_id)
-
         if amount_float is None or amount_float <= 0:
             return PlainTextResponse(f"Could not retrieve valid amount for order {order_id}.", status_code=200)
 
@@ -219,27 +187,21 @@ async def shopify_webhook(
                 "quantity": 1,
             }],
             payment_method_types=["us_bank_account"],
-            metadata={"shopify_order_id": str(order_id)},
+            # CRITICAL: Attach the Shopify Order ID to the metadata for retrieval later
+            metadata={"shopify_order_id": str(order_id)}, 
             after_completion={"type": "redirect", "redirect": {"url": f"https{"://"}{SHOPIFY_STORE_URL}/admin/orders/{order_id}"}}
         )
         payment_link_url: str = payment_link.url
 
-        # 7. Update Shopify Order Note and Send Email
+        # Update Shopify Order Note (This is where the customer gets the link)
         note_text: str = (
             f"Thank you for selecting Manual ACH Payment. To complete your transaction, "
             f"please click the secure payment link below. You will be redirected to Stripe to enter your bank details.\n\n"
             f"👉 SECURE PAYMENT LINK:\n{payment_link_url}"
         )
-
-        if update_shopify_order_note(order_id, note_text):
-            customer_email = data.get("customer", {}).get("email")
-            customer_name = data.get("customer", {}).get("first_name")
-            if customer_email:
-                send_payment_email(customer_email, order_id, payment_link_url, customer_name)
-
-            return PlainTextResponse("Payment link generated and order updated.", status_code=200)
-        else:
-            return PlainTextResponse("Link generated, but failed to update order.", status_code=200)
+        update_shopify_order_note(order_id, note_text)
+        
+        return PlainTextResponse("Payment link generated and order updated.", status_code=200)
 
     except stripe.error.StripeError as e:
         print(f"Stripe API Error during webhook processing: {e}")
@@ -247,3 +209,52 @@ async def shopify_webhook(
     except Exception as e:
         print(f"Unhandled error in webhook: {e}")
         return PlainTextResponse("Unhandled server error.", status_code=200)
+
+
+@app.post("/stripe-webhook")
+async def stripe_webhook(request: Request, stripe_signature: Optional[str] = Header(None)):
+    """
+    Listens for Stripe 'checkout.session.completed' event to mark a Shopify order as paid.
+    """
+    if not STRIPE_WEBHOOK_SECRET_PAYMENT:
+        print("ERROR: STRIPE_WEBHOOK_SECRET_PAYMENT not set. Cannot verify webhook.")
+        return PlainTextResponse("Server Misconfiguration", status_code=500)
+
+    payload = await request.body()
+    
+    # VERIFY SIGNATURE (CRITICAL SECURITY STEP)
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, stripe_signature, STRIPE_WEBHOOK_SECRET_PAYMENT
+        )
+    except Exception as e:
+        print(f"Stripe Webhook Error: Invalid signature or payload: {e}")
+        return PlainTextResponse("Invalid signature or payload", status_code=400)
+
+    # PROCESS EVENT
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object']
+        
+        if session.get("payment_status") == "paid":
+            try:
+                # Retrieve the Shopify Order ID from the metadata
+                shopify_order_id = session['metadata'].get("shopify_order_id")
+                amount_total_cents = session.get("amount_total", 0)
+                
+                if shopify_order_id:
+                    # Convert cents to dollars (e.g., 10000 -> 100.00)
+                    amount_float = amount_total_cents / 100.0 
+                    amount_str = f"{amount_float:.2f}"
+                    
+                    if mark_shopify_order_paid(int(shopify_order_id), amount_str):
+                        print(f"✅ Stripe Payment Success: Shopify Order {shopify_order_id} marked as Paid.")
+                    else:
+                        print(f"❌ Stripe Payment Success: FAILED to mark Shopify Order {shopify_order_id} as paid.")
+                        
+                else:
+                    print("Error: Could not find shopify_order_id in session metadata. Order status not updated.")
+            except Exception as e:
+                print(f"Error processing completed session: {e}")
+
+    # Return a 200 to Stripe immediately to acknowledge receipt
+    return PlainTextResponse("Event received and processed.", status_code=200)
