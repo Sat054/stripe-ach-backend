@@ -8,10 +8,7 @@ from typing import List, Dict, Any, Optional
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import email.utils
-import hmac 
-import hashlib 
-import base64 
+import email.utils 
 
 # --- 1. CORE APPLICATION INITIALIZATION ---
 app = FastAPI(title="Shopify ACH Stripe Link Generator")
@@ -22,7 +19,7 @@ app = FastAPI(title="Shopify ACH Stripe Link Generator")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 SHOPIFY_API_TOKEN = os.getenv("SHOPIFY_API_TOKEN")
 SHOPIFY_STORE_URL = os.getenv("SHOPIFY_STORE_URL")
-SHOPIFY_WEBHOOK_SECRET = os.getenv("SHOPIFY_WEBHOOK_SECRET") 
+# SHOPIFY_WEBHOOK_SECRET is no longer used in this version.
 
 # --- CUSTOM PAYMENT & EMAIL CONFIGURATION (MUST BE SET FOR EMAIL) ---
 MANUAL_PAYMENT_GATEWAY_NAME = os.getenv("MANUAL_PAYMENT_GATEWAY_NAME", "Pay via ACH")
@@ -146,35 +143,10 @@ def update_shopify_order_note(order_id: int, note: str) -> bool:
 
 def verify_webhook_signature(data: bytes, hmac_header: Optional[str]) -> bool:
     """
-    Cryptographically verifies the webhook request using the shared secret.
-    Returns True only if the computed HMAC matches the header value.
+    Bypassing webhook security check as requested.
     """
-    if not hmac_header:
-        print("SECURITY ALERT: Missing X-Shopify-Hmac-Sha256 header.")
-        return False
-    
-    if not SHOPIFY_WEBHOOK_SECRET:
-        # We allow this only in dev environments. In production, this should return False.
-        print("SECURITY ALERT: SHOPIFY_WEBHOOK_SECRET environment variable is not set. Allowing request unverified.")
-        return True 
-
-    try:
-        # 1. Create the computed HMAC digest
-        hmac_digest = hmac.new(
-            SHOPIFY_WEBHOOK_SECRET.encode('utf-8'),
-            data,
-            hashlib.sha256
-        ).digest()
-
-        # 2. Base64 encode the computed HMAC
-        computed_hmac = base64.b64encode(hmac_digest).decode()
-
-        # 3. Securely compare the computed HMAC with the header's HMAC
-        return hmac.compare_digest(computed_hmac, hmac_header)
-
-    except Exception as e:
-        print(f"SECURITY ERROR: Failed to compute or compare HMAC: {e}")
-        return False
+    print("⚠️ WARNING: Webhook security check is disabled.")
+    return True
 
 
 # --- 4. ENDPOINTS ---
@@ -197,8 +169,9 @@ async def shopify_webhook(
     # 1. READ BODY ONCE: Read the body as bytes for HMAC validation
     body_bytes = await request.body()
 
-    # 2. SECURITY: Perform the HMAC validation
+    # 2. SECURITY: Perform the (bypassed) validation
     if not verify_webhook_signature(body_bytes, x_shopify_hmac_sha256):
+        # This code block will not be reached as the function above always returns True
         return PlainTextResponse("Unauthorized", status_code=401)
 
     # 3. EXTRACT DATA
@@ -221,7 +194,7 @@ async def shopify_webhook(
     if not order_id or not gateway:
         return PlainTextResponse("Missing order ID or gateway in payload.", status_code=400)
 
-    print(f"SUCCESS: Received verified webhook for Order ID: {order_id}, Gateway: {gateway}")
+    print(f"SUCCESS: Received webhook for Order ID: {order_id}, Gateway: {gateway}")
 
     # 5. BUSINESS LOGIC: Check if it's the target payment method
     if gateway != MANUAL_PAYMENT_GATEWAY_NAME:
