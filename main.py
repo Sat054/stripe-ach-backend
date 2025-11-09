@@ -8,28 +8,27 @@ from typing import List, Dict, Any, Optional
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import email.utils # Required for setting the "From Name"
 
 # --- 1. CORE APPLICATION INITIALIZATION ---
 app = FastAPI(title="Shopify ACH Stripe Link Generator")
 
 # --- 2. CONFIGURATION & ENVIRONMENT VARIABLES ---
 
-# MANDATORY ENV VARS (Must be set in Render Dashboard)
+# --- CRITICAL API KEYS & URLS (MUST BE SET) ---
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 SHOPIFY_API_TOKEN = os.getenv("SHOPIFY_API_TOKEN")
 SHOPIFY_STORE_URL = os.getenv("SHOPIFY_STORE_URL")
-# SHOPIFY_WEBHOOK_SECRET is needed for actual HMAC validation, currently bypassed for testing
-SHOPIFY_WEBHOOK_SECRET = os.getenv("SHOPIFY_WEBHOOK_SECRET")
+SHOPIFY_WEBHOOK_SECRET = os.getenv("SHOPIFY_WEBHOOK_SECRET") # Required for security check (currently bypassed)
 
-# CUSTOM ENV VAR (Must match the exact name of your manual payment method in Shopify)
+# --- CUSTOM PAYMENT & EMAIL CONFIGURATION (MUST BE SET FOR EMAIL) ---
 MANUAL_PAYMENT_GATEWAY_NAME = os.getenv("MANUAL_PAYMENT_GATEWAY_NAME", "Pay via ACH")
-
-# EMAIL CONFIGURATION (For sending payment instructions via email)
+FROM_NAME = os.getenv("FROM_NAME", "Your Store Name") # Set this to your store's name
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USER)
+SMTP_USER = os.getenv("SMTP_USER") # Sender email username/address
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD") # App Password required for most providers (e.g., Gmail)
+FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USER) # Sender email address
 
 # Stripe Initialization
 if STRIPE_SECRET_KEY:
@@ -54,12 +53,11 @@ def get_order_amount(order_id: int) -> Optional[float]:
         print("Shopify configuration missing. Cannot fetch order amount.")
         return None
 
-    # Use a stable version of the Shopify Admin API
     url = f"https://{SHOPIFY_STORE_URL}/admin/api/2024-07/orders/{order_id}.json"
 
     try:
         response = requests.get(url, headers=headers)
-        response.raise_for_status() # Raises an HTTPError for bad responses (4xx or 5xx)
+        response.raise_for_status()
         order_data: Dict[str, Any] = response.json()
 
         order_info: Optional[Dict[str, Any]] = order_data.get("order")
@@ -67,7 +65,7 @@ def get_order_amount(order_id: int) -> Optional[float]:
             print(f"ERROR: Shopify response is missing 'order' key for ID {order_id}.")
             return None
 
-        # Extract amount from total_price_set or fall back to total_price
+        # Prefer total_price_set's shop_money amount, fall back to total_price
         total_price_usd_str: Optional[str] = (
             order_info.get("total_price_set", {})
             .get("shop_money", {})
@@ -93,14 +91,15 @@ def get_order_amount(order_id: int) -> Optional[float]:
 def send_payment_email(customer_email: str, order_id: int, payment_link_url: str, customer_name: Optional[str] = None) -> bool:
     """Sends an email to the customer with ACH payment instructions and link."""
     if not SMTP_USER or not SMTP_PASSWORD:
-        print("Email configuration missing. Skipping email notification.")
+        print("Email configuration (SMTP_USER/PASSWORD) missing. Skipping email notification.")
         return False
 
     try:
         # Create email
         msg = MIMEMultipart('alternative')
         msg['Subject'] = f"Complete Your ACH Payment - Order #{order_id}"
-        msg['From'] = FROM_EMAIL
+        # Set "From Name" and "From Email" using the formataddr utility
+        msg['From'] = email.utils.formataddr((FROM_NAME, FROM_EMAIL))
         msg['To'] = customer_email
 
         # Create HTML email body
@@ -110,13 +109,13 @@ def send_payment_email(customer_email: str, order_id: int, payment_link_url: str
             <body style='font-family: Arial, sans-serif; color: #333;'>
                 <h2 style='color: #2563eb;'>Complete Your ACH Payment</h2>
                 <p>{greeting}</p>
-                <p>Thank you for your order <strong>#{order_id}</strong>!</p>
+                <p>Thank you for your order <strong>#{order_id}</strong> from {FROM_NAME}!</p>
                 <p>To complete your purchase, please click the secure payment link below:</p>
                 <p style='margin: 30px 0;'>
                     <a href='{payment_link_url}' style='background-color: #2563eb; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; display: inline-block;'>Pay with Bank Account</a>
                 </p>
                 <p>You will be redirected to Stripe to securely enter your bank account details.</p>
-                <p style='margin-top: 30px; font-size: 12px; color: #666;'>If you have any questions, please contact our support team.</p>
+                <p style='margin-top: 30px; font-size: 12px; color: #666;'>If you have any questions, please contact our support team at {FROM_EMAIL}.</p>
             </body>
         </html>
         """
@@ -200,10 +199,7 @@ async def shopify_webhook(
         data: Dict[str, Any] = json.loads(body_bytes.decode('utf-8'))
 
         order_id: int = data.get("id", 0)
-        # Payment gateway names is an array on the order object
         gateway_names: List[str] = data.get("payment_gateway_names", [])
-
-        # Use the first gateway name for payment processing logic
         gateway: Optional[str] = gateway_names[0] if gateway_names and len(gateway_names) > 0 else None
 
     except json.JSONDecodeError as e:
@@ -259,7 +255,7 @@ async def shopify_webhook(
         )
         payment_link_url: str = payment_link.url
 
-        # 7. Update Shopify Order Note (This is how the link gets into the email/thank-you page)
+        # 7. Update Shopify Order Note (The link gets passed to Shopify's default notification systems this way)
         note_text: str = (
             f"Thank you for selecting Manual ACH Payment. To complete your transaction, "
             f"please click the secure payment link below. You will be redirected to Stripe to enter your bank details.\n\n"
@@ -279,15 +275,8 @@ async def shopify_webhook(
 
     except stripe.error.StripeError as e:
         print(f"Stripe API Error during webhook processing: {e}")
-        # Return 200 to prevent Shopify from retrying, as the error is external (Stripe config/API key)
         return PlainTextResponse(f"Stripe error: {e.user_message}", status_code=200)
     except Exception as e:
         print(f"Unhandled error in webhook: {e}")
         return PlainTextResponse("Unhandled server error.", status_code=200)
 ```eof
-
-This file is now completely safe for deployment. All that remains is ensuring your **environment variables** are set correctly on Render.
-
----
-
-Would you like me to walk you through the proper way to implement the **Shopify HMAC security check** using your `SHOPIFY_WEBHOOK_SECRET` before you deploy? It's the most critical security step!
